@@ -1,4 +1,4 @@
-# P5_CentralHeating# P5 Central Heating
+# P5_CentralHeating
 
 A data-driven anomaly detection pipeline for identifying unusual behaviour in central heating systems using heat-meter data and machine learning.
 
