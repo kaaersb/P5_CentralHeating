@@ -22,7 +22,8 @@ def main():
         chunks.append(chunk)
     df = pd.concat(chunks, ignore_index=True)
 
-    print("\n[Task 2/3] Aggregating anomalies by MeterID...")
+    print("\n[Task 2/3] Aggregating anomalies by MeterID (Ranked by Anomaly %)...")
+    
     # Filter strictly for anomalies (-1)
     print("-> Filtering anomalies...")
     anomalies = df[df['Anomaly'] == -1]
@@ -33,45 +34,70 @@ def main():
     print("-> Calculating total readings per meter...")
     total_readings = df.groupby('MeterID').size().reset_index(name='Total_Readings')
     
-    meter_summary = pd.merge(meter_summary, total_readings, on='MeterID')
+    # Merge summary metrics
+    meter_summary = pd.merge(meter_summary, total_readings, on='MeterID', how='right').fillna(0)
     meter_summary['Anomaly_Percentage'] = (meter_summary['Anomaly_Count'] / meter_summary['Total_Readings']) * 100
 
-    # Sort to find worst installations
-    meter_summary = meter_summary.sort_values(by='Anomaly_Count', ascending=False).reset_index(drop=True)
+    # Filter out meters with fewer than 1,000 readings to avoid small-sample bias
+    min_readings_threshold = 1000
+    valid_meters = meter_summary[meter_summary['Total_Readings'] >= min_readings_threshold].copy()
 
-    print("\n--- TOP 10 WORST PERFORMING HEAT METERS ---")
-    print(meter_summary.head(10).to_string(index=False))
+    # Sort strictly by Anomaly Percentage (descending)
+    valid_meters = valid_meters.sort_values(by='Anomaly_Percentage', ascending=False).reset_index(drop=True)
+
+    print(f"\n--- TOP 10 WORST PERFORMING HEAT METERS (RANKED BY ANOMALY %) ---")
+    print(valid_meters.head(10).to_string(index=False))
 
     os.makedirs(output_dir, exist_ok=True)
-    summary_output_path = os.path.join(output_dir, "worst_meters_ranking.csv")
-    meter_summary.to_csv(summary_output_path, index=False)
-    print(f"\n-> Full meter ranking exported to '{summary_output_path}'")
+    summary_output_path = os.path.join(output_dir, "worst_meters_ranked_by_percentage.csv")
+    valid_meters.to_csv(summary_output_path, index=False)
+    print(f"\n-> Full percentage-ranked meter list exported to '{summary_output_path}'")
 
-    print("\n[Task 3/3] Generating diagnostic scatter plot...")
+    print("\n[Task 3/3] Generating multi-axis diagnostic plots...")
     sns.set_theme(style="whitegrid")
-    plt.figure(figsize=(10, 6))
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
-    # Sample data for plotting to avoid overcrowding
+    # Take a representative sample for plotting performance
     sample_df = df.sample(n=min(50000, len(df)), random_state=42)
+    palette = {1: 'blue', -1: 'red'}
 
+    # Panel 1: Flow vs. Delta T (Thermodynamic Efficiency)
     sns.scatterplot(
-        data=sample_df,
-        x='T_outdoor',
-        y='Delta_T_24h',
-        hue='Anomaly',
-        palette={1: 'blue', -1: 'red'},
-        alpha=0.5,
-        s=15
+        data=sample_df, x='Flow_24h', y='Delta_T_24h', hue='Anomaly',
+        palette=palette, alpha=0.4, s=15, ax=axes[0]
     )
+    axes[0].set_title("1. Flow vs. Delta T (Cooling Efficiency)")
+    axes[0].set_xlabel("24h Rolling Flow")
+    axes[0].set_ylabel("24h Rolling Delta T (°C)")
+    axes[0].legend(title='Status', labels=['Normal (1)', 'Anomaly (-1)'])
 
-    plt.title('Isolation Forest: Outdoor Temperature vs. 24h Rolling Delta T')
-    plt.xlabel('Outdoor Temperature (°C)')
-    plt.ylabel('24-Hour Rolling Delta T (°C)')
-    plt.legend(title='Status', labels=['Normal (1)', 'Anomaly (-1)'])
-    
-    plot_output_path = os.path.join(output_dir, "anomaly_scatter_plot.png")
+    # Panel 2: Supply vs. Return Temperature (Sensor & Hardware Faults)
+    sns.scatterplot(
+        data=sample_df, x='T_supply', y='T_return', hue='Anomaly',
+        palette=palette, alpha=0.4, s=15, ax=axes[1]
+    )
+    # Add 1:1 parity line (where T_return = T_supply, indicating 0 °C Delta T)
+    max_temp = max(sample_df['T_supply'].max(), sample_df['T_return'].max())
+    axes[1].plot([0, max_temp], [0, max_temp], 'k--', alpha=0.7, label='1:1 Line (Zero Cooling)')
+    axes[1].set_title("2. Supply vs. Return Temp (Hardware Faults)")
+    axes[1].set_xlabel("Supply Temperature T_supply (°C)")
+    axes[1].set_ylabel("Return Temperature T_return (°C)")
+    axes[1].legend(title='Status')
+
+    # Panel 3: Outdoor Temp vs. Delta T (Weather Correlation)
+    sns.scatterplot(
+        data=sample_df, x='T_outdoor', y='Delta_T_24h', hue='Anomaly',
+        palette=palette, alpha=0.4, s=15, ax=axes[2]
+    )
+    axes[2].set_title("3. Outdoor Temp vs. Delta T (Weather Standard)")
+    axes[2].set_xlabel("Outdoor Temperature (°C)")
+    axes[2].set_ylabel("24h Rolling Delta T (°C)")
+    axes[2].legend(title='Status')
+
+    plt.tight_layout()
+    plot_output_path = os.path.join(output_dir, "multi_axis_anomaly_comparison.png")
     plt.savefig(plot_output_path, dpi=300, bbox_inches='tight')
-    print(f"-> Scatter plot saved to '{plot_output_path}'")
+    print(f"-> Multi-axis diagnostic figure saved to '{plot_output_path}'")
     plt.close()
 
     print("\n==================================================")
