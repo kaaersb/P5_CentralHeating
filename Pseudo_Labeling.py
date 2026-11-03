@@ -228,16 +228,24 @@ def process_meter(h, tout_d, tout_h, model):
     return d.reset_index()
 
 
-def file_groups(files):
-    """Group hourly files so that every meter's data is processed together,
-    even if a meter is split across raw files."""
-    meters = {f: set(pd.read_pickle(f)["MeterID"].unique()) for f in tqdm(files, desc="-> Indexing meters")}
-    groups = []
-    for f in files:
-        merged = [g for g in groups if any(meters[f] & meters[o] for o in g)]
-        new = {f}.union(*merged) if merged else {f}
-        groups = [g for g in groups if g not in merged] + [new]
-    return [sorted(g) for g in groups]
+def meter_file_index(files):
+    """Which raw files each meter appears in (a few meters are split across files)."""
+    where = {}
+    for f in tqdm(files, desc="-> Indexing meters"):
+        for m in pd.read_pickle(f)["MeterID"].unique():
+            where.setdefault(int(m), []).append(f)
+    return where
+
+
+HOURLY_AGG = {"T_supply": "mean", "T_return": "mean", "Flow": "mean",
+              "E_kWh": "max", "V_m3": "max", "E8_m3C": "max", "E9_m3C": "max",
+              "n_air": "sum", "n_reverse": "sum"}
+
+
+def _shrink(r: pd.DataFrame) -> pd.DataFrame:
+    for c in r.select_dtypes("float64").columns:
+        r[c] = r[c].astype(np.float32)
+    return r
 
 
 def main():
@@ -259,19 +267,32 @@ def main():
 
     t0 = time.time()
     results = []
-    for group in file_groups(files):
-        h_all = pd.concat([pd.read_pickle(f) for f in group], ignore_index=True)
-        h_all = (h_all.groupby(["MeterID", "time"], sort=True).agg({
-            "T_supply": "mean", "T_return": "mean", "Flow": "mean",
-            "E_kWh": "max", "V_m3": "max", "E8_m3C": "max", "E9_m3C": "max",
-            "n_air": "sum", "n_reverse": "sum"}).reset_index())
-        name = ",".join(os.path.basename(f) for f in group)
+    where = meter_file_index(files)
+    split_meters = {m for m, fs in where.items() if len(fs) > 1}
+    held = []   # rows of meters that are split across files, processed at the end
+
+    def run(h_all, name):
         for meter, h in tqdm(h_all.groupby("MeterID"), desc=f"-> Labelling {name}", leave=False):
             r = process_meter(h, tout_d, tout_h, model)
             if r is not None:
                 r.insert(0, "MeterID", meter)
-                results.append(r)
-        print(f"-> {name}: done ({time.time() - t0:.0f}s elapsed)")
+                results.append(_shrink(r))
+
+    # One file at a time keeps memory low (~1-2 GB).
+    for f in files:
+        h_all = pd.read_pickle(f)
+        is_split = h_all["MeterID"].isin(split_meters)
+        if is_split.any():
+            held.append(h_all[is_split])
+        run(h_all[~is_split], os.path.basename(f))
+        del h_all
+        print(f"-> {os.path.basename(f)}: done ({time.time() - t0:.0f}s elapsed)")
+
+    if held:
+        h_all = pd.concat(held, ignore_index=True)
+        h_all = h_all.groupby(["MeterID", "time"], sort=True).agg(HOURLY_AGG).reset_index()
+        run(h_all, f"{len(split_meters)} meters split across files")
+        print(f"-> split meters: done ({time.time() - t0:.0f}s elapsed)")
 
     df = pd.concat(results, ignore_index=True)
     os.makedirs(os.path.dirname(OUT_FILE), exist_ok=True)
