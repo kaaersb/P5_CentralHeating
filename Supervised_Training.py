@@ -64,11 +64,17 @@ def make_model():
         max_leaf_nodes=31,
         min_samples_leaf=50,
         l2_regularization=1.0,
-        class_weight="balanced",
         early_stopping=True,
         validation_fraction=0.1,
         random_state=RANDOM_STATE,
     )
+
+
+def class_weights(y):
+    """Square-root balancing: rare classes count more, but not so much that
+    the model flags a third of all normal days (which full balancing did)."""
+    counts = pd.Series(y).value_counts()
+    return pd.Series(y).map((counts.max() / counts) ** 0.5).to_numpy()
 
 
 def load_training_data():
@@ -98,7 +104,7 @@ def main():
     oof_pred = np.empty(len(lab), dtype=object)
     oof_proba = np.zeros((len(lab), len(TRAIN_CLASSES)))
     for k, (tr, va) in enumerate(GroupKFold(n_splits=N_FOLDS).split(X, y, groups)):
-        m = make_model().fit(X.iloc[tr], y[tr])
+        m = make_model().fit(X.iloc[tr], y[tr], sample_weight=class_weights(y[tr]))
         oof_pred[va] = m.predict(X.iloc[va])
         proba = m.predict_proba(X.iloc[va])
         oof_proba[va] = proba[:, [list(m.classes_).index(c) for c in TRAIN_CLASSES]]
@@ -149,7 +155,7 @@ def main():
     plt.close(fig)
 
     print("\n[3/4] Training final model on all labelled rows...")
-    model = make_model().fit(X, y)
+    model = make_model().fit(X, y, sample_weight=class_weights(y))
 
     sub = lab.sample(n=min(50_000, len(lab)), random_state=RANDOM_STATE)
     imp = permutation_importance(model, sub[FEATURES], sub["label"], scoring="f1_macro",
