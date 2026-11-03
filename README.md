@@ -307,6 +307,63 @@ In particular:
 
 ---
 
+## Fault classification (pseudo-labels + supervised model)
+
+The Isolation Forest says *that* something is unusual, not *what*. This part
+gives every meter-day a fault label with transparent rules, trains a
+supervised classifier on those labels, and tests it on the radiator sensor data.
+
+### Steps
+
+```bash
+python Pseudo_Labeling/reduce_raw.py      # raw CSVs -> compact hourly tables (once)
+python Pseudo_Labeling.py                 # rules -> one label per meter-day
+python Supervised_Training.py             # train + grouped cross-validation
+python Validate_On_Radiator_Data.py --sensors radiator_data.csv --faults fault_log.csv
+```
+
+`python Validate_On_Radiator_Data.py --make-example` writes two example files
+showing the input format the radiator data and fault log must have.
+
+### Labels
+
+| Label | Rule (heating days, daily mean outdoor temp < 12 °C) |
+| --- | --- |
+| `normal` | flow-weighted ΔT ≥ 25 °C, consumption 60–140 % of the meter's energy signature, no error codes |
+| `low_cooling` | flow-weighted ΔT < 15 °C while consumption is at least 50 % of expected |
+| `no_heat_draw` | outdoor < 8 °C and consumption below 15 % of expected |
+| `high_consumption` | excess over the energy signature > 50 % of a 0 °C day, sustained over 3 days |
+| `meter_fault` | the meter reports reverse flow, or air in the flow meter for ≥ 6 hours |
+| `uncertain` | none of the above clearly; not used for training |
+| `off_season` | outdoor ≥ 12 °C; not used |
+
+All thresholds are in `RULES` at the top of `Pseudo_Labeling.py`.
+
+### Avoiding circular labels
+
+Labels are made from information the model never sees: flow-weighted ΔT from
+the cumulative counters (`Energi 8`, `Energi 9`, `Volumen 1`), daily energy
+against each meter's own energy signature, and the meter error codes
+(`InfoKoder`). The model only gets features from hourly supply, return and
+outdoor temperature (`Pseudo_Labeling/heat_features.py`) — exactly what the
+radiator sensor measures. Features are relative to each installation's own
+normal behaviour, so a 70/35 °C district heating meter and a 45/30 °C radiator
+are comparable.
+
+The overlap is not zero (flow-weighted and hourly ΔT are correlated), so the
+model is always reported next to a plain ΔT rule.
+
+### What the scores mean
+
+* `Outputs/supervised_cv_report.txt`: agreement with the **pseudo-labels** on
+  meters the model has not seen (GroupKFold by `MeterID`). Not fault accuracy.
+* `Outputs/radiator_validation_report.txt`: agreement with **staged, logged
+  faults** on real radiators. This is the actual test.
+* `Outputs/iforest_vs_pseudolabels.csv`: which kinds of days the existing
+  Isolation Forest flags.
+
+---
+
 ## License
 
 This project is licensed under the **GNU General Public License v3.0 (GPL-3.0)**.
