@@ -325,32 +325,35 @@ python Validate_On_Radiator_Data.py --sensors radiator_data.csv --faults fault_l
 `python Validate_On_Radiator_Data.py --make-example` writes two example files
 showing the input format the radiator data and fault log must have.
 
-### Labels
+### Labels (the group's rules)
 
-| Label | Rule (heating days, daily mean outdoor temp < 12 °C) |
-| --- | --- |
-| `normal` | flow-weighted ΔT ≥ 25 °C, consumption 60–140 % of the meter's energy signature, no error codes |
-| `low_cooling` | flow-weighted ΔT < 15 °C while consumption is at least 50 % of expected |
-| `no_heat_draw` | outdoor < 8 °C and consumption below 15 % of expected |
-| `high_consumption` | excess over the energy signature > 50 % of a 0 °C day, sustained over 3 days |
-| `meter_fault` | the meter reports reverse flow, or air in the flow meter for ≥ 6 hours |
-| `uncertain` | none of the above clearly; not used for training |
-| `off_season` | outdoor ≥ 12 °C; not used |
+Every meter gets its own baseline for energy (E), flow (Q), flow-weighted ΔT
+and return temperature as a function of outdoor temperature (T_out). Rules
+are checked in this order and the first match wins:
 
-All thresholds are in `RULES` at the top of `Pseudo_Labeling.py`.
+| # | Label | Rule |
+| --- | --- | --- |
+| 1 | `fejlinstallation` | ΔT < 0 with flow in ≥ 3 hours; or water but no energy; or energy but no water; or \|E − c·Q·ΔT\| / E > 0.3; or T_out < 12 and median hourly ΔT < 10 °C |
+| 2 | `radiator_slukket` | T_out < 5, E and Q below 30 % of baseline |
+| 3 | `blokeret_radiator` | T_out < 12, Q below 50 % of baseline |
+| 4 | `radiator_helt_aaben` | 8 < T_out < 12 with E, Q > 130 %, ΔT < 85 % and return ≥ 2 °C above baseline; or T_out < 12 with E > 150 %, \|corr(E, T_out)\| < 0.3 over 14 days and night use ≥ 90 % of day use |
+| 5 | `aabent_vindue` | T_out < 5, daytime, hourly E > 250 % (and +1 kWh) of the same hour on the previous 7 days, for 2–6 hours, then back to normal |
+| 6 | `normal` | everything else |
+| – | `ingen_data` | too few readings to apply the rules; not used |
+
+All numbers are in `RULES` at the top of `Pseudo_Labeling.py`.
+`Outputs/pseudo_label_rule_hits.csv` shows how often each sub-rule fires.
 
 ### Avoiding circular labels
 
-Labels are made from information the model never sees: flow-weighted ΔT from
-the cumulative counters (`Energi 8`, `Energi 9`, `Volumen 1`), daily energy
-against each meter's own energy signature, and the meter error codes
-(`InfoKoder`). The model only gets features from hourly supply, return and
+The rules are mostly built on energy and flow (and flow-weighted values from
+the `Energi 8` / `Energi 9` counters), which the model never sees. The model only gets features from hourly supply, return and
 outdoor temperature (`Pseudo_Labeling/heat_features.py`) — exactly what the
 radiator sensor measures. Features are relative to each installation's own
 normal behaviour, so a 70/35 °C district heating meter and a 45/30 °C radiator
 are comparable.
 
-The overlap is not zero (flow-weighted and hourly ΔT are correlated), so the
+The overlap is not zero (rules 1a, 1e and 4A also use temperatures), so the
 model is always reported next to a plain ΔT rule.
 
 ### What the scores mean

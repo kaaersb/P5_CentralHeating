@@ -44,6 +44,9 @@ FEATURES = [
     "d_Tr_7d",           # mean of d_Tr over the last 7 days (slow drift)
     "Tr_max_rise",       # largest hour-to-hour rise in return temp / reference ΔT
     "Ts_range",          # (p90 - p10) of hourly supply temp / reference ΔT
+    "Tr_peak_2h",        # (highest 2-hour mean return temp - daily median) / reference ΔT
+    "dT_peak_2h",        # (highest 2-hour mean ΔT - daily median ΔT) / reference ΔT
+    "night_day_dT",      # (mean ΔT 00-06 - mean ΔT 10-16) / reference ΔT
     "HDD",               # heating degree days, from outdoor temperature
 ]
 
@@ -54,6 +57,11 @@ def _daily_from_hourly(h: pd.DataFrame) -> pd.DataFrame:
     h["date"] = h["time"].dt.floor("D")
     h["dT"] = h["T_supply"] - h["T_return"]
     h["Tr_rise"] = h["T_return"].diff().where(h["time"].diff() == pd.Timedelta("1h"))
+    # short peaks within the day (an open window lasts hours, not days)
+    hh = h.set_index("time")
+    h["Tr_2h"] = hh["T_return"].rolling("2h", min_periods=2).mean().to_numpy()
+    h["dT_2h"] = hh["dT"].rolling("2h", min_periods=2).mean().to_numpy()
+    hour = h["time"].dt.hour
 
     g = h.groupby("date")
     d = pd.DataFrame({
@@ -67,6 +75,10 @@ def _daily_from_hourly(h: pd.DataFrame) -> pd.DataFrame:
         "Ts_p90": g["T_supply"].quantile(0.90),
         "Tr_max_rise_abs": g["Tr_rise"].max(),
         "frac_neg_dT": g["dT"].apply(lambda s: float((s < 0).mean())),
+        "Tr_peak_abs": g["Tr_2h"].max() - g["T_return"].median(),
+        "dT_peak_abs": g["dT_2h"].max() - g["dT"].median(),
+        "night_day_abs": (h["dT"].where(hour < 6).groupby(h["date"]).mean()
+                          - h["dT"].where(hour.between(10, 15)).groupby(h["date"]).mean()),
     })
     num = (d["Tr_mean"] - ROOM_TEMP)
     den = (d["Ts_mean"] - ROOM_TEMP)
@@ -127,6 +139,9 @@ def installation_day_features(hourly: pd.DataFrame,
     d["d_theta"] = d["theta"] - r_theta
     d["Tr_max_rise"] = d["Tr_max_rise_abs"] / scale
     d["Ts_range"] = (d["Ts_p90"] - d["Ts_p10"]) / scale
+    d["Tr_peak_2h"] = d["Tr_peak_abs"] / scale
+    d["dT_peak_2h"] = d["dT_peak_abs"] / scale
+    d["night_day_dT"] = d["night_day_abs"] / scale
     d["frac_low_dT"] = (h["dT"] < 0.5 * scale).groupby(h["date"]).mean().reindex(d.index)
 
     prev = d["rel_dT"].shift(1).where(d.index.to_series().diff() == pd.Timedelta("1D"))

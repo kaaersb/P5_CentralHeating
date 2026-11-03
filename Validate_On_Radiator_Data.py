@@ -53,18 +53,18 @@ MIN_FAULT_HOURS = 12
 REFERENCE_DAYS = 5
 DMI_STATION = "06030"   # Flyvestation Aalborg
 
-# Which model class each staged fault is EXPECTED to look like. This mapping is a
-# physical hypothesis, not a fact: e.g. a covered radiator gives off less heat,
-# the thermostat opens further, more water passes and the return temperature
-# rises -> low cooling. Report where it holds and where it does not.
+# Which of the group's rule classes each staged fault is EXPECTED to look like.
+# This is a hypothesis, not a fact, and the meter rules describe a whole
+# dwelling while the staged faults affect one radiator. Report where the
+# mapping holds and where it does not.
 FAULT_TO_CLASS = {
     "normal": "normal",
-    "thermostat_max": "low_cooling",
-    "radiator_covered": "low_cooling",
-    "window_open": "high_consumption",
-    "thermostat_off": "no_heat_draw",
-    "valve_closed": "no_heat_draw",
-    "thermostat_blocked": "no_heat_draw",
+    "thermostat_off": "radiator_slukket",
+    "valve_closed": "radiator_slukket",
+    "radiator_covered": "blokeret_radiator",
+    "thermostat_blocked": "blokeret_radiator",
+    "thermostat_max": "radiator_helt_aaben",
+    "window_open": "aabent_vindue",
 }
 
 

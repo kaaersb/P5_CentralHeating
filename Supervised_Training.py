@@ -6,7 +6,7 @@ Output: Models/fault_classifier.pkl
         Outputs/supervised_cv_report.txt
         Outputs/supervised_confusion_matrix.png
         Outputs/supervised_feature_importance.csv
-        Outputs/supervised_predictions_on_uncertain_days.csv
+        Outputs/supervised_predictions_on_ingen_data_days.csv
 
 Evaluation is done with GroupKFold over MeterID: a meter is never in both the
 training and the validation fold, so the score says something about NEW
@@ -45,10 +45,12 @@ INPUT_FILE = "Data/Processed_Data/meter_days_labeled.pkl"
 MODEL_FILE = "Models/fault_classifier.pkl"
 OUT_DIR = "Outputs"
 
-# meter_fault (air in the flow meter, reverse flow) is an error in the heat
-# meter itself. A radiator sensor has no flow meter, so the class cannot occur
-# on the test data and is left out of the model by default.
-TRAIN_CLASSES = ["normal", "low_cooling", "no_heat_draw", "high_consumption"]
+# The group's six rules (Pseudo_Labeling.py). Days labelled "ingen_data" are
+# never used. Training uses heating days only (outdoor < 12 °C): almost all
+# rules need it, and the radiator test data is collected in the heating season.
+TRAIN_CLASSES = ["normal", "fejlinstallation", "radiator_slukket", "blokeret_radiator",
+                 "radiator_helt_aaben", "aabent_vindue"]
+HEATING_MAX_TOUT = 12.0
 MAX_PER_CLASS = 300_000     # cap on rows per class (speed); minority classes are kept whole
 N_FOLDS = 5
 RANDOM_STATE = 42
@@ -73,7 +75,7 @@ def load_training_data():
     if not os.path.exists(INPUT_FILE):
         raise FileNotFoundError(f"{INPUT_FILE} not found. Run Pseudo_Labeling.py first.")
     df = pd.read_pickle(INPUT_FILE)
-    lab = df[df["label"].isin(TRAIN_CLASSES)].copy()
+    lab = df[df["label"].isin(TRAIN_CLASSES) & (df["T_outdoor"] < HEATING_MAX_TOUT)].copy()
     lab = lab.dropna(subset=["rel_dT"])   # need at least the core feature
 
     parts = []
@@ -157,16 +159,16 @@ def main():
     imp_df.to_csv(os.path.join(OUT_DIR, "supervised_feature_importance.csv"), index=False)
     print(imp_df.to_string(index=False))
 
-    print("\n[4/4] Saving model and predicting the 'uncertain' days...")
+    print("\n[4/4] Saving model and predicting days the rules could not be applied to...")
     os.makedirs(os.path.dirname(MODEL_FILE), exist_ok=True)
     joblib.dump({"model": model, "features": FEATURES, "classes": list(model.classes_),
                  "train_classes": TRAIN_CLASSES}, MODEL_FILE)
 
-    unc = df[(df["label"] == "uncertain")].dropna(subset=["rel_dT"])
+    unc = df[(df["label"] == "ingen_data") & (df["T_outdoor"] < HEATING_MAX_TOUT)].dropna(subset=["rel_dT"])
     if len(unc):
         unc_pred = pd.Series(model.predict(unc[FEATURES])).value_counts(normalize=True).rename("share")
-        unc_pred.to_csv(os.path.join(OUT_DIR, "supervised_predictions_on_uncertain_days.csv"))
-        print("Predicted classes for days the rules could not label:\n", unc_pred.to_string())
+        unc_pred.to_csv(os.path.join(OUT_DIR, "supervised_predictions_on_ingen_data_days.csv"))
+        print("Predicted classes for heating days the rules could not be applied to:\n", unc_pred.to_string())
 
     print(f"\nDone in {(time.time() - t0) / 60:.1f} min. Model saved to {MODEL_FILE}")
 

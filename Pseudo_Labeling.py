@@ -1,45 +1,55 @@
 """
-Pseudo-labelling of the Zenodo heat-meter data.
+Pseudo-labelling of the Zenodo heat-meter data, following the group's rules.
 
 Goes through all meters and gives every meter-day a fault label, so that a
 supervised classifier can be trained (Supervised_Training.py).
 
-WHY THE LABELS AND THE FEATURES ARE KEPT APART
-----------------------------------------------
-If we labelled with rules on ΔT and then trained a model on ΔT, the model
-would just re-learn our thresholds and score ~100 % without proving anything.
-So:
-  * LABELS are built from information the model never sees:
-      - flow-weighted daily ΔT, from the meter's cumulative volume x temperature
-        counters (Energi 8 / Energi 9), not from the hourly temperatures
-      - daily energy and volume, compared to the meter's own energy signature
-      - the meter's own error codes (InfoKoder)
-  * FEATURES (Pseudo_Labeling/heat_features.py) use only hourly supply/return
-    temperature and outdoor temperature, i.e. what the radiator sensor measures.
-The model therefore has to learn how a fault *looks in the temperatures*,
-which is what we need on the radiator data later.
+BASIC IDEA
+----------
+Every meter gets its own baseline for energy (E), flow (Q), ΔT (supply minus
+return) and return temperature, each as a function of outdoor temperature
+(T_out). "Clearly higher/lower than normal" always means compared with the
+meter's own baseline at that day's outdoor temperature.
 
-Some overlap remains (flow-weighted ΔT and hourly ΔT are related), so the rule
-baseline in Supervised_Training.py must be reported next to the model.
-
-LABELS (one per meter-day, heating season only)
+RULES (checked in this order, first match wins)
 -----------------------------------------------
-  normal            good cooling, consumption as expected, no error codes
-  low_cooling       flow-weighted ΔT is low while there is a real heat load:
-                    too much water for the heat delivered (wrong settings,
-                    bypass, valve/thermostat faults)
-  no_heat_draw      heat use collapses on a cold day (heating off, valve
-                    closed or stuck, dwelling empty)
-  high_consumption  energy far above the meter's own energy signature
-                    (window open, setpoint too high, ...)
-  meter_fault       the meter itself reports an error (air in the flow meter,
-                    reverse flow)
-  uncertain         matches no rule clearly -> not used for training
-  off_season        outdoor temperature too high for space heating -> not used
+1) fejlinstallation   (any outdoor temperature)
+     a) ΔT < 0 while there is flow, in >= n hours of the day
+     b) Q > 0 but E ≈ 0 over the day
+     c) E > 0 but Q = 0 over the day
+     d) |E - c·Q·ΔT| / E > 0.3 over the day (energy balance does not add up)
+     e) T_out < 12 and median hourly ΔT over the day below a threshold
+2) radiator_slukket   T_out < 5, E and Q clearly lower than normal
+3) blokeret_radiator  T_out < 12, Q clearly lower than normal
+4) radiator_helt_aaben
+     A) 8 < T_out < 12, E and Q clearly higher, ΔT lower and return
+        temperature higher than normal, OR
+     B) T_out < 12, E clearly higher, AND E no longer follows the weather
+        (|corr(E, T_out)| < 0.3 over the last n days) AND night use is
+        >= 90 % of day use
+5) aabent_vindue      T_out < 5, daytime, sudden rise in hourly E compared
+                      with the same hour on the previous n days, lasting 1-6
+                      hours, after which E returns to normal
+6) normal             everything else
+
+Days with too little data to apply the rules are labelled `ingen_data` and
+are not used for training.
+
+Every "n" and every "clearly" is a number in RULES below, so it can be argued
+for in the report and changed in one place.
+
+WHY THE MODEL CANNOT JUST RE-LEARN THE RULES
+--------------------------------------------
+The rules use E and Q (energy and flow), plus flow-weighted values from the
+meter's counters. The model (Pseudo_Labeling/heat_features.py) only sees
+hourly supply, return and outdoor temperature, which is what the radiator
+sensor measures. Some rules also use temperatures (1a, 1e, 4A), so the overlap
+is not zero; the training script reports a plain ΔT rule next to the model.
 
 Output:
   Data/Processed_Data/meter_days_labeled.pkl     one row per meter-day
   Outputs/pseudo_label_summary.csv               label counts
+  Outputs/pseudo_label_rule_hits.csv             how often each sub-rule fires
   Outputs/iforest_vs_pseudolabels.csv            which anomalies the Isolation
                                                  Forest actually flags
 
@@ -62,7 +72,7 @@ except ImportError:  # progress bars are optional
         return it
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "Pseudo_Labeling"))
-from heat_features import installation_day_features, daily_outdoor, HDD_BASE  # noqa: E402
+from heat_features import installation_day_features, daily_outdoor  # noqa: E402
 
 HOURLY_DIR = "Data/Processed_Data/hourly"
 DMI_FILE = "Data/dmi_outdoor_temp_cache.csv"
@@ -70,131 +80,220 @@ IFOREST_FILE = "Models/isolation_forest_model.pkl"
 OUT_FILE = "Data/Processed_Data/meter_days_labeled.pkl"
 OUT_DIR = "Outputs"
 
+C_WATER = 1.16   # kWh per m³ per K (heat capacity of water at 40-70 °C)
+
 # ---------------------------------------------------------------------------
-# Labelling rules. All thresholds are here so they can be argued for in the
-# report and changed in one place.
+# All numbers used by the rules. "n" values are counted in hourly readings
+# unless the name says days.
 # ---------------------------------------------------------------------------
 RULES = {
-    "heating_max_tout": 12.0,     # daily mean outdoor temp (°C) for a heating day
-    "min_hours": 20,              # hourly readings needed for a usable day
-    "min_volume_m3": 0.05,        # below this, flow-weighted ΔT is unreliable
+    # data needed before any rule is applied
+    "min_hours": 20,                  # hourly readings in the day
 
-    # low_cooling: flow-weighted ΔT below this (°C).
-    # Leiria et al. (2023) used ΔT < 10 °C to trigger technician visits; we use
-    # a slightly wider band and require it on the flow-weighted value.
-    "low_cooling_dT": 15.0,
-    # ... and only when there is a real heat load (consumption at least this
-    # share of expected). Low ΔT on days with almost no heat use is normal for
-    # district heating (hot-water circulation dominates) and is not a fault.
-    "low_cooling_min_ratio": 0.5,
-    # normal requires at least this flow-weighted ΔT (°C); 15-25 is "uncertain"
-    "normal_min_dT": 25.0,
+    # baselines (per meter, per variable, as a function of T_out)
+    "baseline_max_tout": 12.0,        # baselines are fitted on heating days
+    "baseline_min_days": 60,
+    "baseline_min_expected_kwh": 5.0, # below this the E-baseline is too small to compare
 
-    # energy signature: daily kWh ~ a + b * HDD, fitted robustly per meter
-    "signature_min_days": 60,
-    "signature_min_expected_kwh": 10.0,
-    # no_heat_draw: cold day and consumption below this share of expected
-    "no_draw_max_tout": 8.0,
-    "no_draw_max_ratio": 0.15,
-    # high_consumption: daily excess over the signature above this share of the
-    # meter's typical consumption on a 0 °C day. Using a fixed reference
-    # (instead of a ratio to the expected value) keeps the rule from firing
-    # mostly on mild days, where the expected value is small.
-    "high_excess_share": 0.5,
-    # ... and sustained: the mean excess over day-1..day+1 must also be above
-    # this share. Single-day spikes are usually hot water, not a heating fault.
-    "high_excess_share_3d": 0.35,
-    # normal: consumption within this band of expected
-    "normal_ratio_band": (0.6, 1.4),
+    # 1) fejlinstallation
+    "r1_neg_dT_hours": 3,             # a) n hours with ΔT < 0 while flow > 0
+    "r1_flow_no_energy_m3": 0.2,      # b) at least this much water ...
+    "r1_flow_no_energy_kwh": 0.0,     #    ... but energy at most this
+    "r1_energy_no_flow_kwh": 2.0,     # c) at least this much energy with no water
+    "r1_balance_max_error": 0.3,      # d) |E - c·Q·ΔT| / E above this
+    "r1_balance_min_kwh": 5.0,        #    only on days with at least this energy
+    "r1_low_median_dT": 10.0,         # e) median hourly ΔT below this (°C) ...
+    "r1_low_median_min_flow_m3": 0.2, #    ... on days with real flow
+    "r1_max_tout": 12.0,
 
-    # meter_fault: hours in the day with an error code
-    "fault_min_hours_reverse": 1,
-    "fault_min_hours_air": 6,
+    # 2) radiator_slukket
+    "r2_max_tout": 5.0,
+    "r2_max_ratio": 0.3,              # E and Q below 30 % of baseline
+
+    # 3) blokeret_radiator
+    "r3_max_tout": 12.0,
+    "r3_max_q_ratio": 0.5,            # Q below 50 % of baseline
+
+    # 4) radiator_helt_aaben
+    "r4a_tout": (8.0, 12.0),
+    "r4a_min_ratio": 1.3,             # E and Q above 130 % of baseline
+    "r4a_max_dT_ratio": 0.85,         # ΔT below 85 % of baseline
+    "r4a_min_tr_excess": 2.0,         # return temp at least 2 °C above baseline
+    "r4b_max_tout": 12.0,
+    "r4b_min_ratio": 1.5,             # E above 150 % of baseline
+    "r4b_corr_days": 14,              # n days for the E/T_out correlation
+    "r4b_corr_min_days": 10,
+    "r4b_corr_min_tout_std": 2.0,     # need some weather variation to judge it
+    "r4b_max_abs_corr": 0.3,
+    "r4b_night_day_ratio": 0.9,       # night (00-06) use >= 90 % of day (10-16) use
+    "r4b_require_all": True,          # True: E high AND weak corr AND flat night.
+                                      # False: E high AND (weak corr OR flat night)
+
+    # 5) aabent_vindue
+    "r5_max_tout": 5.0,
+    "r5_day_hours": (7, 22),          # daytime: 07:00 - 21:59
+    "r5_history_days": 7,             # compare with the same hour on n previous days
+    "r5_min_history": 4,
+    "r5_rise_factor": 2.5,            # hourly E above 250 % of that median ...
+    "r5_rise_min_kwh": 1.0,           # ... and at least this much above it
+    # The group's rule says 1-6 hours. A 1-hour rise is almost always a shower or
+    # bath (hot water goes through the same meter), so we require 2 hours.
+    "r5_min_duration_h": 2,           # episode lasts min..max hours, then back to normal
+    "r5_max_duration_h": 6,
 }
 
-LABELS = ["normal", "low_cooling", "no_heat_draw", "high_consumption", "meter_fault"]
+LABELS = ["normal", "fejlinstallation", "radiator_slukket", "blokeret_radiator",
+          "radiator_helt_aaben", "aabent_vindue"]
 
 
 # ---------------------------------------------------------------------------
-def label_inputs(h: pd.DataFrame) -> pd.DataFrame:
-    """Daily values from the meter's counters (information the model never sees)."""
-    h = h.assign(date=h["time"].dt.floor("D"))
+# Hourly and daily quantities from the meter (the model never sees these)
+# ---------------------------------------------------------------------------
+def hourly_quantities(h: pd.DataFrame) -> pd.DataFrame:
+    """Per-hour energy and volume from the cumulative counters."""
+    h = h.copy()
+    step_ok = h["time"].diff() == pd.Timedelta("1h")
+    for src, dst in [("E_kWh", "E_h"), ("V_m3", "Q_h")]:
+        diff = h[src].diff().where(step_ok)
+        h[dst] = diff.where(diff >= 0)
+    h["dT_h"] = h["T_supply"] - h["T_return"]
+    # hourly heat from flow and ΔT: much finer resolution than the whole-kWh counter
+    h["EQ_h"] = C_WATER * h["Q_h"] * h["dT_h"]
+    h["date"] = h["time"].dt.floor("D")
+    h["hour"] = h["time"].dt.hour
+    return h
+
+
+def daily_quantities(h: pd.DataFrame) -> pd.DataFrame:
+    R = RULES
     g = h.groupby("date")
     d = pd.DataFrame({
         "n_readings_h": g["time"].count(),
-        "E_max": g["E_kWh"].max(),
-        "V_max": g["V_m3"].max(),
-        "E8_max": g["E8_m3C"].max(),
-        "E9_max": g["E9_m3C"].max(),
-        "hours_air": g["n_air"].apply(lambda s: int((s > 0).sum())),
-        "hours_reverse": g["n_reverse"].apply(lambda s: int((s > 0).sum())),
+        "E_day": g["E_h"].sum(min_count=R["min_hours"]),
+        "Q_day": g["Q_h"].sum(min_count=R["min_hours"]),
+        "EQ_day": g["EQ_h"].sum(min_count=R["min_hours"]),
+        "median_dT_h": g["dT_h"].median(),
+        "neg_dT_hours": (h["dT_h"] < 0).where(h["Q_h"] > 0, False).groupby(h["date"]).sum(),
+        "E_night": h[h["hour"] < 6].groupby("date")["E_h"].sum(min_count=5),
+        "E_daytime": h[h["hour"].between(10, 15)].groupby("date")["E_h"].sum(min_count=5),
     })
+    # flow-weighted daily ΔT and return temperature from the Energi 8/9 counters
+    e8 = g["E8_m3C"].max().diff()
+    e9 = g["E9_m3C"].max().diff()
     consecutive = d.index.to_series().diff() == pd.Timedelta("1D")
-    for src, dst in [("E_max", "dE_kWh"), ("V_max", "dV_m3"), ("E8_max", "dE8"), ("E9_max", "dE9")]:
-        diff = d[src].diff().where(consecutive)
-        d[dst] = diff.where(diff >= 0)            # counter resets / swaps -> NaN
-    ok = d["dV_m3"] >= RULES["min_volume_m3"]
-    d["dT_flow_weighted"] = ((d["dE8"] - d["dE9"]) / d["dV_m3"]).where(ok)
-    d["Tr_flow_weighted"] = (d["dE9"] / d["dV_m3"]).where(ok)
-    return d.drop(columns=["E_max", "V_max", "E8_max", "E9_max", "dE8", "dE9"])
+    q_ok = (d["Q_day"] >= 0.05) & consecutive
+    d["dT_fw"] = ((e8 - e9) / d["Q_day"]).where(q_ok)
+    d["Tr_fw"] = (e9 / d["Q_day"]).where(q_ok)
+    d["hours_air"] = g["n_air"].apply(lambda s: int((s > 0).sum()))
+    d["hours_reverse"] = g["n_reverse"].apply(lambda s: int((s > 0).sum()))
+    return d
 
 
-def energy_signature(d: pd.DataFrame):
-    """Robust fit of daily kWh ~ a + b*HDD on heating days.
-    Returns (expected kWh per day, expected kWh on a 0 °C day)."""
-    heat = d[(d["T_outdoor"] < RULES["heating_max_tout"]) & d["dE_kWh"].notna()]
-    expected = pd.Series(np.nan, index=d.index)
-    if len(heat) < RULES["signature_min_days"]:
-        return expected, np.nan
-    X = heat[["HDD"]].to_numpy()
-    y = heat["dE_kWh"].to_numpy()
+def fit_baseline(d: pd.DataFrame, col: str) -> pd.Series:
+    """Robust per-meter baseline: col ~ a + b·T_out, fitted on heating days."""
+    R = RULES
+    fit = d[(d["T_outdoor"] < R["baseline_max_tout"]) & d[col].notna() & d["T_outdoor"].notna()]
+    out = pd.Series(np.nan, index=d.index)
+    if len(fit) < R["baseline_min_days"]:
+        return out
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         try:
-            reg = HuberRegressor(max_iter=500).fit(X, y)
+            reg = HuberRegressor(max_iter=500).fit(fit[["T_outdoor"]].to_numpy(), fit[col].to_numpy())
         except Exception:
-            return expected, np.nan
-    if reg.coef_[0] <= 0:      # no heating response: signature meaningless
-        return expected, np.nan
-    expected[:] = reg.predict(d[["HDD"]].fillna(0).to_numpy())
-    return expected, float(reg.predict([[HDD_BASE]])[0])
+            return out
+    has_t = d["T_outdoor"].notna()
+    out[has_t] = reg.predict(d.loc[has_t, ["T_outdoor"]].to_numpy())
+    return out
 
 
-def assign_labels(d: pd.DataFrame) -> pd.Series:
+def open_window_episodes(h: pd.DataFrame, tout_daily: pd.Series) -> pd.Series:
+    """Rule 5: number of short daytime E spikes per day."""
     R = RULES
-    lab = pd.Series("uncertain", index=d.index, dtype=object)
+    x = h.set_index("time")["EQ_h"]
+    x = x.reindex(pd.date_range(x.index.min(), x.index.max(), freq="1h"))
+    hours = x.index.hour
+    # median of the same clock hour on the previous n days
+    same_hour = pd.concat([x.shift(24 * k) for k in range(1, R["r5_history_days"] + 1)], axis=1)
+    ref = same_hour.median(axis=1).where(same_hour.notna().sum(axis=1) >= R["r5_min_history"])
+    spike = (x > R["r5_rise_factor"] * ref) & ((x - ref) > R["r5_rise_min_kwh"])
+    lo, hi = R["r5_day_hours"]
+    daytime = (hours >= lo) & (hours < hi)
+    cold = pd.Series(tout_daily.reindex(x.index.floor("D")).to_numpy() < R["r5_max_tout"], index=x.index)
+    spike = spike & daytime & cold
 
-    usable = d["n_readings_h"] >= R["min_hours"]
-    heating = d["T_outdoor"] < R["heating_max_tout"]
+    # runs of consecutive spike hours; keep runs of 1..max hours that are
+    # followed by a normal (not spiking, measured) hour
+    run_id = (spike != spike.shift()).cumsum()
+    episodes = pd.Series(0, index=x.index.floor("D").unique())
+    for _, run in spike[spike].groupby(run_id[spike]):
+        after = run.index[-1] + pd.Timedelta("1h")
+        back_to_normal = after in x.index and pd.notna(x.get(after)) and not spike.get(after, False)
+        if R["r5_min_duration_h"] <= len(run) <= R["r5_max_duration_h"] and back_to_normal:
+            episodes[run.index[0].floor("D")] += 1
+    return episodes
 
-    exp_ok = d["expected_kwh"] >= R["signature_min_expected_kwh"]
-    ratio = d["consumption_ratio"]
-    dT = d["dT_flow_weighted"]
-    errors = (d["hours_air"] > 0) | (d["hours_reverse"] > 0)
 
-    meter_fault = (d["hours_reverse"] >= R["fault_min_hours_reverse"]) | (d["hours_air"] >= R["fault_min_hours_air"])
-    no_draw = exp_ok & (d["T_outdoor"] < R["no_draw_max_tout"]) & (d["dE_kWh"] <= R["no_draw_max_ratio"] * d["expected_kwh"])
-    low_cool = (dT < R["low_cooling_dT"]) & exp_ok & (ratio >= R["low_cooling_min_ratio"])
-    excess = (d["dE_kWh"] - d["expected_kwh"]) / d["ref_kwh_0C"]
-    # mean excess over day-1 .. day+1 (window ending tomorrow, moved back one day)
-    excess_3d = (excess.rolling("3D", min_periods=3).mean()
-                 .shift(-1, freq="D").reindex(d.index))
-    high = exp_ok & (excess > R["high_excess_share"]) & (excess_3d > R["high_excess_share_3d"])
-    lo, hi = R["normal_ratio_band"]
-    normal = (dT >= R["normal_min_dT"]) & exp_ok & ratio.between(lo, hi) & ~errors
+def weather_correlation(d: pd.DataFrame) -> pd.Series:
+    """Rule 4B: |corr(E_day, T_out)| over the last n days."""
+    R = RULES
+    win = f'{R["r4b_corr_days"]}D'
+    corr = d["E_day"].rolling(win, min_periods=R["r4b_corr_min_days"]).corr(d["T_outdoor"])
+    tstd = d["T_outdoor"].rolling(win, min_periods=R["r4b_corr_min_days"]).std()
+    return corr.abs().where(tstd >= R["r4b_corr_min_tout_std"])
 
-    # Order = priority: a later assignment overwrites an earlier one.
-    lab[normal] = "normal"
-    lab[high] = "high_consumption"
-    lab[low_cool] = "low_cooling"
-    lab[no_draw] = "no_heat_draw"
-    lab[meter_fault] = "meter_fault"
 
-    # air in the flow meter makes all flow-based labels unreliable
-    lab[(d["hours_air"] > 0) & (lab != "meter_fault")] = "uncertain"
-    lab[~usable] = "uncertain"
-    lab[~heating] = "off_season"
-    return lab
+# ---------------------------------------------------------------------------
+def assign_labels(d: pd.DataFrame):
+    R = RULES
+    t = d["T_outdoor"]
+    E, Q = d["E_day"], d["Q_day"]
+    e_ok = d["E_base"] >= R["baseline_min_expected_kwh"]
+    rE = (E / d["E_base"]).where(e_ok)
+    rQ = (Q / d["Q_base"]).where(d["Q_base"] > 0)
+    rdT = (d["dT_fw"] / d["dT_base"]).where(d["dT_base"] > 1)
+    tr_excess = d["Tr_fw"] - d["Tr_base"]
+
+    hits = pd.DataFrame(index=d.index)
+    # 1) fejlinstallation
+    hits["1a_neg_dT"] = d["neg_dT_hours"] >= R["r1_neg_dT_hours"]
+    hits["1b_flow_no_energy"] = (Q >= R["r1_flow_no_energy_m3"]) & (E <= R["r1_flow_no_energy_kwh"])
+    hits["1c_energy_no_flow"] = (E >= R["r1_energy_no_flow_kwh"]) & (Q == 0)
+    bal_err = ((E - d["EQ_day"]).abs() / E).where(E >= R["r1_balance_min_kwh"])
+    d["energy_balance_error"] = bal_err
+    hits["1d_energy_balance"] = bal_err > R["r1_balance_max_error"]
+    hits["1e_low_median_dT"] = ((t < R["r1_max_tout"]) & (Q >= R["r1_low_median_min_flow_m3"])
+                                & (d["median_dT_h"] < R["r1_low_median_dT"]))
+    # 2) radiator_slukket
+    hits["2_radiator_off"] = (t < R["r2_max_tout"]) & (rE < R["r2_max_ratio"]) & (rQ < R["r2_max_ratio"])
+    # 3) blokeret_radiator
+    hits["3_blocked"] = (t < R["r3_max_tout"]) & (rQ < R["r3_max_q_ratio"])
+    # 4) radiator_helt_aaben
+    lo, hi = R["r4a_tout"]
+    hits["4a_open_mild"] = ((t > lo) & (t < hi) & (rE > R["r4a_min_ratio"]) & (rQ > R["r4a_min_ratio"])
+                            & (rdT < R["r4a_max_dT_ratio"]) & (tr_excess > R["r4a_min_tr_excess"]))
+    weak_corr = d["abs_corr_E_Tout"] < R["r4b_max_abs_corr"]
+    flat_night = d["night_day_ratio"] >= R["r4b_night_day_ratio"]
+    pattern = (weak_corr & flat_night) if R["r4b_require_all"] else (weak_corr | flat_night)
+    hits["4b_open_constant"] = (t < R["r4b_max_tout"]) & (rE > R["r4b_min_ratio"]) & pattern
+    # 5) aabent_vindue
+    hits["5_open_window"] = d["window_episodes"] > 0
+    hits = hits.fillna(False).astype(bool)
+
+    lab = pd.Series("normal", index=d.index, dtype=object)
+    order = [("aabent_vindue", ["5_open_window"]),
+             ("radiator_helt_aaben", ["4a_open_mild", "4b_open_constant"]),
+             ("blokeret_radiator", ["3_blocked"]),
+             ("radiator_slukket", ["2_radiator_off"]),
+             ("fejlinstallation", ["1a_neg_dT", "1b_flow_no_energy", "1c_energy_no_flow",
+                                   "1d_energy_balance", "1e_low_median_dT"])]
+    for name, cols in order:          # reversed priority: rule 1 is written last and wins
+        lab[hits[cols].any(axis=1)] = name
+
+    # The rules cannot be applied without a full day of readings and the counters
+    enough = (d["n_readings_h"] >= R["min_hours"]) & E.notna() & Q.notna() & t.notna()
+    lab[~enough] = "ingen_data"
+    return lab, hits
 
 
 # ---------------------------------------------------------------------------
@@ -213,15 +312,19 @@ def iforest_daily_share(h: pd.DataFrame, model, tout_hourly: pd.Series) -> pd.Se
 
 
 def process_meter(h, tout_d, tout_h, model):
-    h = h.sort_values("time").reset_index(drop=True)
+    h = hourly_quantities(h.sort_values("time").reset_index(drop=True))
     feats = installation_day_features(h[["time", "T_supply", "T_return"]], tout_d)
     if feats.empty:
         return None
-    d = label_inputs(h)
-    d = d.join(feats.set_index("date"), how="inner")
-    d["expected_kwh"], d["ref_kwh_0C"] = energy_signature(d)
-    d["consumption_ratio"] = d["dE_kWh"] / d["expected_kwh"].where(d["expected_kwh"] > 0)
-    d["label"] = assign_labels(d)
+    d = daily_quantities(h).join(feats.set_index("date"), how="inner")
+    for col, base in [("E_day", "E_base"), ("Q_day", "Q_base"), ("dT_fw", "dT_base"), ("Tr_fw", "Tr_base")]:
+        d[base] = fit_baseline(d, col)
+    d["abs_corr_E_Tout"] = weather_correlation(d)
+    d["night_day_ratio"] = d["E_night"] / d["E_daytime"].where(d["E_daytime"] > 0)
+    d["window_episodes"] = open_window_episodes(h, tout_d).reindex(d.index).fillna(0)
+    d["label"], hits = assign_labels(d)
+    for c in hits:
+        d[f"rule_{c}"] = hits[c]
     if model is not None:
         d["iforest_anomaly_share"] = iforest_daily_share(h, model, tout_h).reindex(d.index)
     d.index.name = "date"
@@ -299,14 +402,25 @@ def main():
     df.to_pickle(OUT_FILE)
 
     os.makedirs(OUT_DIR, exist_ok=True)
-    summary = (df.groupby("label").agg(meter_days=("MeterID", "size"), meters=("MeterID", "nunique"))
-                 .assign(share_of_heating_days=lambda s: s.meter_days / s.loc[s.index != "off_season", "meter_days"].sum()))
-    summary.loc["off_season", "share_of_heating_days"] = np.nan
+    heating = df["T_outdoor"] < RULES["r1_max_tout"]
+    summary = pd.DataFrame({
+        "meter_days": df["label"].value_counts(),
+        "meters": df.groupby("label")["MeterID"].nunique(),
+        "heating_days": df.loc[heating, "label"].value_counts(),
+    }).fillna(0).astype(int)
+    summary["share_of_heating_days"] = summary["heating_days"] / summary["heating_days"].sum()
     summary.to_csv(os.path.join(OUT_DIR, "pseudo_label_summary.csv"))
     print("\nLabel counts:\n", summary.to_string())
 
+    rule_cols = [c for c in df.columns if c.startswith("rule_")]
+    hits = pd.DataFrame({"days_rule_fires": df[rule_cols].sum(),
+                         "share_of_heating_days": df.loc[heating, rule_cols].mean()})
+    hits.index = [c.removeprefix("rule_") for c in hits.index]
+    hits.to_csv(os.path.join(OUT_DIR, "pseudo_label_rule_hits.csv"))
+    print("\nHow often each sub-rule fires (before priority is applied):\n", hits.to_string())
+
     if "iforest_anomaly_share" in df:
-        heat = df[df["label"] != "off_season"].copy()
+        heat = df[heating & (df["label"] != "ingen_data")].copy()
         heat["iforest_flag_day"] = heat["iforest_anomaly_share"] >= 0.5
         comp = heat.groupby("label").agg(
             meter_days=("MeterID", "size"),
@@ -316,7 +430,8 @@ def main():
         flagged = heat[heat["iforest_flag_day"]]
         comp["share_of_iforest_flags"] = flagged["label"].value_counts(normalize=True)
         comp.to_csv(os.path.join(OUT_DIR, "iforest_vs_pseudolabels.csv"))
-        print("\nWhat the Isolation Forest flags (days with >= 50 % anomalous hours):\n", comp.to_string())
+        print("\nWhat the Isolation Forest flags on heating days "
+              "(days with >= 50 % anomalous hours):\n", comp.to_string())
 
     print(f"\nSaved {len(df):,} meter-days for {df.MeterID.nunique()} meters to {OUT_FILE} "
           f"in {(time.time() - t0) / 60:.1f} min")
