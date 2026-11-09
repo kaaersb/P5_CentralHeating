@@ -74,11 +74,13 @@ except ImportError:  # progress bars are optional
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "Pseudo_Labeling"))
 from heat_features import installation_day_features, daily_outdoor  # noqa: E402
 
-HOURLY_DIR = "Data/Processed_Data/hourly"
-DMI_FILE = "Data/dmi_outdoor_temp_cache.csv"
-IFOREST_FILE = "Models/isolation_forest_model.pkl"
-OUT_FILE = "Data/Processed_Data/meter_days_labeled.pkl"
-OUT_DIR = "Outputs"
+# Paths are relative to the repository root, so the script works from any folder.
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+HOURLY_DIR = os.path.join(REPO_ROOT, "Data/Processed_Data/hourly")
+DMI_FILE = os.path.join(REPO_ROOT, "Data/dmi_outdoor_temp_cache.csv")
+IFOREST_FILE = os.path.join(REPO_ROOT, "Models/isolation_forest_model.pkl")
+OUT_FILE = os.path.join(REPO_ROOT, "Data/Processed_Data/meter_days_labeled.pkl")
+OUT_DIR = os.path.join(REPO_ROOT, "Outputs")
 
 C_WATER = 1.16   # kWh per m³ per K (heat capacity of water at 40-70 °C)
 

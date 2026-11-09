@@ -41,9 +41,11 @@ from sklearn.model_selection import GroupKFold
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "Pseudo_Labeling"))
 from heat_features import FEATURES  # noqa: E402
 
-INPUT_FILE = "Data/Processed_Data/meter_days_labeled.pkl"
-MODEL_FILE = "Models/fault_classifier.pkl"
-OUT_DIR = "Outputs"
+# Paths are relative to the repository root, so the script works from any folder.
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+INPUT_FILE = os.path.join(REPO_ROOT, "Data/Processed_Data/meter_days_labeled.pkl")
+MODEL_FILE = os.path.join(REPO_ROOT, "Models/fault_classifier.pkl")
+OUT_DIR = os.path.join(REPO_ROOT, "Outputs")
 
 # The group's six rules (Pseudo_Labeling.py). Days labelled "ingen_data" are
 # never used. Training uses heating days only (outdoor < 12 °C): almost all

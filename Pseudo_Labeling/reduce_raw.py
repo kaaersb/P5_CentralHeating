@@ -22,8 +22,10 @@ import time
 import numpy as np
 import pandas as pd
 
-RAW_DIR = "Data/Raw_Data"
-OUT_DIR = "Data/Processed_Data/hourly"
+# Paths are relative to the repository root, so the script works from any folder.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RAW_DIR = os.path.join(REPO_ROOT, "Data/Raw_Data")
+OUT_DIR = os.path.join(REPO_ROOT, "Data/Processed_Data/hourly")
 
 RAW_COLUMNS = {
     "MeterID": "MeterID",
@@ -92,7 +94,13 @@ def main():
     files = sys.argv[1:] or sorted(glob.glob(os.path.join(RAW_DIR, "*.csv")))
     files = [f for f in files if "dmi_outdoor_temp_cache" not in f]
     if not files:
-        raise FileNotFoundError(f"No raw CSV files found in {RAW_DIR}")
+        raise FileNotFoundError(f"No raw CSV files found in {RAW_DIR}. "
+                                "Put 1.csv ... 25.csv there (see README).")
+    pointers = [f for f in files if os.path.getsize(f) < 1000]
+    if pointers:
+        raise RuntimeError(
+            f"{len(pointers)} raw file(s) are Git LFS pointers, not data (e.g. {pointers[0]}).\n"
+            "Download the real files with:  git lfs install && git lfs pull")
     for f in files:
         reduce_file(f)
 

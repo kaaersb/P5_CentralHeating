@@ -47,8 +47,10 @@ from sklearn.metrics import classification_report, confusion_matrix, precision_s
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "Pseudo_Labeling"))
 from heat_features import installation_day_features, to_hourly, daily_outdoor  # noqa: E402
 
-MODEL_FILE = "Models/fault_classifier.pkl"
-OUT_DIR = "Outputs"
+# Paths are relative to the repository root, so the script works from any folder.
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+MODEL_FILE = os.path.join(REPO_ROOT, "Models/fault_classifier.pkl")
+OUT_DIR = os.path.join(REPO_ROOT, "Outputs")
 MIN_FAULT_HOURS = 12
 REFERENCE_DAYS = 5
 DMI_STATION = "06030"   # Flyvestation Aalborg
