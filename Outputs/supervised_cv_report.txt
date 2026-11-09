@@ -1,0 +1,33 @@
+SUPERVISED FAULT CLASSIFIER - grouped cross-validation (unseen meters)
+
+Scores measure agreement with the PSEUDO-LABELS, not with real faults.
+
+Rows: 456,438   Meters: 3123   Features: 17
+
+                     precision    recall  f1-score   support
+
+             normal      0.917     0.849     0.881    300000
+   fejlinstallation      0.776     0.824     0.799     31400
+   radiator_slukket      0.668     0.683     0.675      3198
+  blokeret_radiator      0.696     0.757     0.725     60348
+radiator_helt_aaben      0.374     0.478     0.420      6488
+      aabent_vindue      0.630     0.782     0.697     55004
+
+           accuracy                          0.820    456438
+          macro avg      0.677     0.729     0.700    456438
+       weighted avg      0.834     0.820     0.825    456438
+
+Balanced accuracy: 0.729
+Macro F1:          0.700
+
+FAULT vs NORMAL (any fault class counts as fault)
+  PR-AUC model:                  0.889   (chance level = 0.343)
+  model                          precision 0.746  recall 0.853  F1 0.796
+  rule dT_mean < 10 C            precision 0.993  recall 0.106  F1 0.191
+
+Per-class recall of the rule (which faults a ΔT rule can and cannot see):
+  fejlinstallation   rule 0.274   model 0.955
+  radiator_slukket   rule 0.452   model 0.947
+  blokeret_radiator  rule 0.108   model 0.866
+  radiator_helt_aaben rule 0.000   model 0.565
+  aabent_vindue      rule 0.000   model 0.809
