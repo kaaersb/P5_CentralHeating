@@ -1,0 +1,36 @@
+VALIDATION ON RADIATOR DATA (staged faults)
+
+Days scored: 49  (excluded: 1 partial-fault days, 10 reference days)
+
+                     precision    recall  f1-score   support
+
+             normal      1.000     0.977     0.988        43
+   fejlinstallation      0.000     0.000     0.000         0
+   radiator_slukket      0.000     0.000     0.000         3
+  blokeret_radiator      0.000     0.000     0.000         1
+radiator_helt_aaben      0.000     0.000     0.000         2
+
+           accuracy                          0.857        49
+          macro avg      0.200     0.195     0.198        49
+       weighted avg      0.878     0.857     0.867        49
+
+Confusion matrix (rows = expected, cols = predicted):
+                     normal  fejlinstallation  radiator_slukket  blokeret_radiator  radiator_helt_aaben
+normal                   42                 0                 0                  0                    1
+fejlinstallation          0                 0                 0                  0                    0
+radiator_slukket          0                 0                 0                  3                    0
+blokeret_radiator         0                 1                 0                  0                    0
+radiator_helt_aaben       0                 2                 0                  0                    0
+
+FAULT vs NORMAL
+  model                                precision 0.857  recall 1.000  F1 0.923
+  rule: daily ΔT < 50 % of reference   precision 1.000  recall 0.667  F1 0.800
+
+Per staged fault type (share of days predicted as each class):
+predicted_class   blokeret_radiator  fejlinstallation  normal  radiator_helt_aaben
+fault_type                                                                        
+normal                          0.0               0.0    0.98                 0.02
+radiator_covered                0.0               1.0    0.00                 0.00
+thermostat_max                  0.0               1.0    0.00                 0.00
+thermostat_off                  1.0               0.0    0.00                 0.00
+valve_closed                    1.0               0.0    0.00                 0.00
